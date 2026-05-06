@@ -33,18 +33,30 @@ def resolve_filename(template: str | None = None) -> str:
     return name
 
 
+DATE_FORMATS: dict[str, str] = {
+    "YYYYMMDD":    "%Y%m%d",       # 20250506
+    "YYYY-MM-DD":  "%Y-%m-%d",     # 2025-05-06
+    "YYYY_MM_DD":  "%Y_%m_%d",     # 2025_05_06
+    "DD-MM-YYYY":  "%d-%m-%Y",     # 06-05-2025
+    "MM-DD-YYYY":  "%m-%d-%Y",     # 05-06-2025
+    "DDMMYYYY":    "%d%m%Y",       # 06052025
+    "DD.MM.YYYY":  "%d.%m.%Y",     # 06.05.2025
+}
+
+TIME_FORMATS: dict[str, str] = {
+    "HHMMSS":    "%H%M%S",         # 143022
+    "HH-MM-SS":  "%H-%M-%S",       # 14-30-22
+    "HH_MM_SS":  "%H_%M_%S",       # 14_30_22
+    "HH.MM.SS":  "%H.%M.%S",       # 14.30.22
+}
+
+
 def _format_date(dt: datetime, fmt: str) -> str:
-    if fmt == "YYYY-MM-DD":
-        return dt.strftime("%Y-%m-%d")
-    if fmt == "DDMMYYYY":
-        return dt.strftime("%d%m%Y")
-    return dt.strftime("%Y%m%d")
+    return dt.strftime(DATE_FORMATS.get(fmt, "%Y%m%d"))
 
 
 def _format_time(dt: datetime, fmt: str) -> str:
-    if fmt == "HH-MM-SS":
-        return dt.strftime("%H-%M-%S")
-    return dt.strftime("%H%M%S")
+    return dt.strftime(TIME_FORMATS.get(fmt, "%H%M%S"))
 
 
 def _next_counter(today: date) -> int:

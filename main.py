@@ -329,12 +329,95 @@ def main():
 # ---------------------------------------------------------------------------
 
 
+def _ask_save_name(default_stem: str) -> str:
+    """Show a dialog letting the user rename the recording before it is saved.
+
+    Returns the chosen stem (without extension). Returns *default_stem* if
+    the user cancels or clears the field.
+    """
+    result = {"stem": default_stem}
+
+    root = tk.Tk()
+    root.withdraw()
+    dlg = tk.Toplevel(root)
+    dlg.title("Save Recording As")
+    dlg.resizable(False, False)
+    dlg.grab_set()
+    dlg.lift()
+    dlg.focus_force()
+
+    pad = {"padx": 12, "pady": 6}
+
+    tk.Label(dlg, text="Recording name:", anchor="w").grid(
+        row=0, column=0, columnspan=2, sticky="w", **pad
+    )
+
+    entry_var = tk.StringVar(value=default_stem)
+    entry = tk.Entry(dlg, textvariable=entry_var, width=52)
+    entry.grid(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 4))
+    entry.select_range(0, tk.END)
+    entry.focus_set()
+
+    hint = tk.Label(
+        dlg,
+        text="Extension (.wav / .mp3) will be added automatically.",
+        fg="gray",
+        font=("TkDefaultFont", 8),
+    )
+    hint.grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
+
+    def _save(_event=None):
+        chosen = entry_var.get().strip()
+        if chosen:
+            result["stem"] = chosen
+        dlg.destroy()
+
+    def _keep_default():
+        dlg.destroy()
+
+    btn_frame = tk.Frame(dlg)
+    btn_frame.grid(row=3, column=0, columnspan=2, sticky="e", padx=12, pady=(0, 10))
+    tk.Button(btn_frame, text="Keep Default Name", command=_keep_default, width=18).pack(
+        side="left", padx=(0, 6)
+    )
+    tk.Button(btn_frame, text="Save", command=_save, width=10, default="active").pack(
+        side="left"
+    )
+
+    entry.bind("<Return>", _save)
+    dlg.protocol("WM_DELETE_WINDOW", _keep_default)
+
+    # Centre the dialog over the screen
+    dlg.update_idletasks()
+    w, h = dlg.winfo_width(), dlg.winfo_height()
+    sw, sh = dlg.winfo_screenwidth(), dlg.winfo_screenheight()
+    dlg.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+
+    dlg.wait_window()
+    root.destroy()
+    return result["stem"]
+
+
 def _finish_recording(recorder):
     from recorder import convert_to_mp3
+    from utils import unique_path
 
     wav_path = recorder.stop_recording()
     if wav_path is None:
         return
+
+    # Let the user rename before the file is finalised
+    chosen_stem = _ask_save_name(wav_path.stem)
+
+    if chosen_stem != wav_path.stem:
+        folder = config.get("output_folder", str(Path.home() / "Documents" / "Teams Recordings"))
+        new_wav = unique_path(folder, chosen_stem, ".wav")
+        try:
+            wav_path.rename(new_wav)
+            wav_path = new_wav
+            logger.info("Recording renamed to: %s", wav_path)
+        except OSError as e:
+            logger.warning("Could not rename recording: %s — keeping original name", e)
 
     fmt = config.get("file_format", "wav")
     if fmt == "mp3":

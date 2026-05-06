@@ -127,28 +127,64 @@ class SettingsWindow:
             row=6, column=1, columnspan=2, sticky="w", padx=(4, 0)
         )
 
-        # Date / Time format
+        # Date / Time format — values shown as "FORMAT  →  example"
+        from utils import DATE_FORMATS, TIME_FORMATS
+        from datetime import datetime as _dt
+        _now = _dt.now()
+
+        def _date_choices():
+            import time as _time
+            return [
+                f"{k}  →  {_now.strftime(v)}"
+                for k, v in DATE_FORMATS.items()
+            ]
+
+        def _time_choices():
+            return [
+                f"{k}  →  {_now.strftime(v)}"
+                for k, v in TIME_FORMATS.items()
+            ]
+
+        def _strip_example(val: str) -> str:
+            return val.split("  →  ")[0].strip()
+
         ttk.Label(frame, text="Date format:").grid(row=7, column=0, sticky="w", pady=4)
-        date_var = tk.StringVar(value=self._working.get("date_format", "YYYYMMDD"))
+        date_choices = _date_choices()
+        saved_date = self._working.get("date_format", "YYYYMMDD")
+        date_display = next(
+            (c for c in date_choices if c.startswith(saved_date)), date_choices[0]
+        )
+        date_var = tk.StringVar(value=date_display)
         self._vars["date_format"] = date_var
+        self._vars["_date_strip"] = _strip_example
         ttk.Combobox(
             frame, textvariable=date_var,
-            values=["YYYYMMDD", "YYYY-MM-DD", "DDMMYYYY"],
-            state="readonly", width=14,
-        ).grid(row=7, column=1, sticky="w", padx=(4, 0))
+            values=date_choices,
+            state="readonly", width=26,
+        ).grid(row=7, column=1, columnspan=2, sticky="w", padx=(4, 0))
 
         ttk.Label(frame, text="Time format:").grid(row=8, column=0, sticky="w", pady=4)
-        time_var = tk.StringVar(value=self._working.get("time_format", "HHMMSS"))
+        time_choices = _time_choices()
+        saved_time = self._working.get("time_format", "HHMMSS")
+        time_display = next(
+            (c for c in time_choices if c.startswith(saved_time)), time_choices[0]
+        )
+        time_var = tk.StringVar(value=time_display)
         self._vars["time_format"] = time_var
+        self._vars["_time_strip"] = _strip_example
         ttk.Combobox(
             frame, textvariable=time_var,
-            values=["HHMMSS", "HH-MM-SS"],
-            state="readonly", width=14,
-        ).grid(row=8, column=1, sticky="w", padx=(4, 0))
+            values=time_choices,
+            state="readonly", width=26,
+        ).grid(row=8, column=1, columnspan=2, sticky="w", padx=(4, 0))
 
         def _update_preview(*_):
             try:
-                preview = preview_filename(tpl_var.get(), date_var.get(), time_var.get())
+                preview = preview_filename(
+                    tpl_var.get(),
+                    _strip_example(date_var.get()),
+                    _strip_example(time_var.get()),
+                )
                 preview_var.set(preview)
             except Exception:
                 preview_var.set("(invalid template)")
@@ -295,13 +331,14 @@ class SettingsWindow:
             ch_str = self._vars["channels"].get()
             channels = 1 if ch_str == "Mono" else 2
 
+            strip = self._vars.get("_date_strip", lambda x: x)
             return {
                 "output_folder": self._vars["output_folder"].get().strip(),
                 "file_format": fmt,
                 "mp3_bitrate": int(self._vars["mp3_bitrate"].get()),
                 "filename_template": self._vars["filename_template"].get().strip(),
-                "date_format": self._vars["date_format"].get(),
-                "time_format": self._vars["time_format"].get(),
+                "date_format": strip(self._vars["date_format"].get()),
+                "time_format": strip(self._vars["time_format"].get()),
                 "mic_device": self._vars["mic_device"].get(),
                 "speaker_device": self._vars["speaker_device"].get(),
                 "sample_rate": int(self._vars["sample_rate"].get()),
