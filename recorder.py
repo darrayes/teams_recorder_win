@@ -9,12 +9,13 @@ import numpy as np
 import soundfile as sf
 
 from config import config
+from platform_utils import PLATFORM
 from utils import resolve_filename, unique_path
 
 logger = logging.getLogger(__name__)
 
 CHUNK_FRAMES = 512
-QUEUE_MAXSIZE = 100
+QUEUE_MAXSIZE = 200
 GAIN = 0.707  # -3 dB per channel to prevent clipping
 
 
@@ -36,9 +37,15 @@ class Recorder:
         self._stop_event = threading.Event()
         self._paused = False
 
+        # PyAudio handles (Windows)
         self._pa = None
         self._mic_stream = None
         self._loopback_stream = None
+
+        # sounddevice handles (macOS / Linux)
+        self._sd_mic_stream = None
+        self._sd_loopback_stream = None
+
         self._sf_writer: Optional[sf.SoundFile] = None
 
         self._current_wav_path: Optional[Path] = None
@@ -46,14 +53,8 @@ class Recorder:
         self._part_index = 0
         self._base_stem: Optional[str] = None
 
-        self._device_error_mic = False
-        self._device_error_loopback = False
-
         self._target_rate: int = 48000
         self._channels: int = 1
-
-        self._mic_native_rate: int = 48000
-        self._loopback_native_rate: int = 48000
 
     # ------------------------------------------------------------------
     # Public API
@@ -77,7 +78,10 @@ class Recorder:
         self._channels = config.get("channels", 1)
 
         try:
-            self._open_streams()
+            if PLATFORM == "Windows":
+                self._open_streams_windows()
+            else:
+                self._open_streams_sounddevice()
         except Exception as e:
             logger.error("Failed to open audio streams: %s", e)
             self._cleanup_streams()
@@ -110,7 +114,9 @@ class Recorder:
         self._paused = False
         self._start_time = time.monotonic()
 
-        self._mixer_thread = threading.Thread(target=self._mixer_loop, daemon=True, name="mixer")
+        self._mixer_thread = threading.Thread(
+            target=self._mixer_loop, daemon=True, name="mixer"
+        )
         self._mixer_thread.start()
 
         self._set_state(RecorderState.RECORDING)
@@ -155,37 +161,40 @@ class Recorder:
         logger.info("Recording resumed")
 
     # ------------------------------------------------------------------
-    # Stream management
+    # Windows stream (pyaudiowpatch / WASAPI loopback)
     # ------------------------------------------------------------------
 
-    def _open_streams(self):
-        import pyaudiowpatch as pyaudio  # Windows-only import
+    def _open_streams_windows(self):
+        import pyaudiowpatch as pyaudio
 
         self._pa = pyaudio.PyAudio()
-
         mic_device_cfg = config.get("mic_device", "default")
         loopback_device_cfg = config.get("speaker_device", "default")
 
         # --- Mic stream ---
-        mic_idx, mic_rate = self._resolve_input_device(mic_device_cfg)
-        self._mic_native_rate = mic_rate
+        # Discover the native channel count so we don't force mono on a
+        # device that only supports stereo — downmix happens in the callback.
+        mic_idx, mic_native_ch, mic_native_rate = self._query_input_device_windows(
+            mic_device_cfg
+        )
 
         def mic_cb(in_data, frame_count, time_info, status):
             try:
                 buf = np.frombuffer(in_data, dtype=np.int16).copy()
-                if self._mic_native_rate != self._target_rate:
-                    buf = self._resample(buf, self._mic_native_rate, self._target_rate)
+                if mic_native_ch > 1 and self._channels == 1:
+                    buf = buf.reshape(-1, mic_native_ch).mean(axis=1).astype(np.int16)
+                if mic_native_rate != self._target_rate:
+                    buf = self._resample(buf, mic_native_rate, self._target_rate)
                 if not self._mic_queue.full():
                     self._mic_queue.put_nowait(buf)
             except Exception as e:
                 logger.warning("Mic callback error: %s", e)
-                self._device_error_mic = True
             return (None, pyaudio.paContinue)
 
         mic_kwargs = dict(
             format=pyaudio.paInt16,
-            channels=self._channels,
-            rate=mic_rate,
+            channels=mic_native_ch,
+            rate=mic_native_rate,
             input=True,
             frames_per_buffer=CHUNK_FRAMES,
             stream_callback=mic_cb,
@@ -195,56 +204,80 @@ class Recorder:
 
         self._mic_stream = self._pa.open(**mic_kwargs)
         self._mic_stream.start_stream()
-        logger.info("Mic stream opened (device=%s, rate=%d)", mic_device_cfg, mic_rate)
+        logger.info(
+            "Mic stream opened (device=%s, rate=%d, ch=%d)",
+            mic_device_cfg, mic_native_rate, mic_native_ch,
+        )
 
         # --- Loopback stream ---
-        loopback_device = self._find_loopback_device(loopback_device_cfg)
+        loopback_device = self._find_loopback_device_windows(loopback_device_cfg)
         if loopback_device is None:
-            raise RuntimeError("No WASAPI loopback device found for the selected output device.")
+            logger.warning("No WASAPI loopback device found — recording mic only")
+        else:
+            loopback_rate = int(loopback_device["defaultSampleRate"])
+            loopback_ch = min(int(loopback_device.get("maxInputChannels", 2)), 2)
 
-        loopback_rate = int(loopback_device["defaultSampleRate"])
-        self._loopback_native_rate = loopback_rate
+            def loopback_cb(in_data, frame_count, time_info, status):
+                try:
+                    buf = np.frombuffer(in_data, dtype=np.int16).copy()
+                    if loopback_ch > 1 and self._channels == 1:
+                        buf = buf.reshape(-1, loopback_ch).mean(axis=1).astype(np.int16)
+                    if loopback_rate != self._target_rate:
+                        buf = self._resample(buf, loopback_rate, self._target_rate)
+                    if not self._loopback_queue.full():
+                        self._loopback_queue.put_nowait(buf)
+                except Exception as e:
+                    logger.warning("Loopback callback error: %s", e)
+                return (None, pyaudio.paContinue)
 
-        loopback_channels = min(
-            int(loopback_device.get("maxInputChannels", 2)),
-            2,
-        )
+            self._loopback_stream = self._pa.open(
+                format=pyaudio.paInt16,
+                channels=loopback_ch,
+                rate=loopback_rate,
+                input=True,
+                input_device_index=loopback_device["index"],
+                frames_per_buffer=CHUNK_FRAMES,
+                stream_callback=loopback_cb,
+            )
+            self._loopback_stream.start_stream()
+            logger.info(
+                "Loopback stream opened (device=%s, rate=%d, ch=%d)",
+                loopback_device["name"], loopback_rate, loopback_ch,
+            )
 
-        def loopback_cb(in_data, frame_count, time_info, status):
+    def _query_input_device_windows(self, device_cfg: str):
+        """Return (device_index, native_channels, native_rate) for an input device."""
+        import pyaudiowpatch as pyaudio
+
+        if device_cfg == "default":
             try:
-                buf = np.frombuffer(in_data, dtype=np.int16).copy()
-                # Downmix to mono if needed
-                if loopback_channels > 1 and self._channels == 1:
-                    buf = buf.reshape(-1, loopback_channels).mean(axis=1).astype(np.int16)
-                elif loopback_channels > 1 and self._channels == 2 and loopback_channels == 1:
-                    buf = np.column_stack([buf, buf]).reshape(-1).astype(np.int16)
+                wasapi = self._pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+                idx = wasapi.get("defaultInputDevice")
+                if idx is not None:
+                    info = self._pa.get_device_info_by_index(idx)
+                    return (
+                        idx,
+                        int(info.get("maxInputChannels", 1)),
+                        int(info["defaultSampleRate"]),
+                    )
+            except Exception:
+                pass
+            return None, 1, self._target_rate
 
-                if loopback_rate != self._target_rate:
-                    buf = self._resample(buf, loopback_rate, self._target_rate)
+        count = self._pa.get_device_count()
+        for i in range(count):
+            info = self._pa.get_device_info_by_index(i)
+            if info["name"] == device_cfg and info["maxInputChannels"] > 0:
+                return (
+                    i,
+                    int(info["maxInputChannels"]),
+                    int(info["defaultSampleRate"]),
+                )
 
-                if not self._loopback_queue.full():
-                    self._loopback_queue.put_nowait(buf)
-            except Exception as e:
-                logger.warning("Loopback callback error: %s", e)
-                self._device_error_loopback = True
-            return (None, pyaudio.paContinue)
+        logger.warning("Mic device '%s' not found, using default", device_cfg)
+        return None, 1, self._target_rate
 
-        self._loopback_stream = self._pa.open(
-            format=pyaudio.paInt16,
-            channels=loopback_channels,
-            rate=loopback_rate,
-            input=True,
-            input_device_index=loopback_device["index"],
-            frames_per_buffer=CHUNK_FRAMES,
-            stream_callback=loopback_cb,
-        )
-        self._loopback_stream.start_stream()
-        logger.info(
-            "Loopback stream opened (device=%s, rate=%d, ch=%d)",
-            loopback_device["name"], loopback_rate, loopback_channels,
-        )
-
-    def _find_loopback_device(self, speaker_cfg: str):
+    def _find_loopback_device_windows(self, speaker_cfg: str):
         import pyaudiowpatch as pyaudio
 
         try:
@@ -257,37 +290,98 @@ class Recorder:
             default_out_idx = wasapi_info.get("defaultOutputDevice")
             if default_out_idx is None:
                 return None
-            default_out = self._pa.get_device_info_by_index(default_out_idx)
-            target_name = default_out["name"]
+            target_name = self._pa.get_device_info_by_index(default_out_idx)["name"]
         else:
             target_name = speaker_cfg
 
-        for loopback in self._pa.get_loopback_device_info_generator():
-            if target_name.lower() in loopback["name"].lower():
-                return loopback
+        # First pass: match by name
+        for lb in self._pa.get_loopback_device_info_generator():
+            if target_name.lower() in lb["name"].lower():
+                return lb
 
-        # Fallback: return the first available loopback device
-        for loopback in self._pa.get_loopback_device_info_generator():
-            logger.warning("Using fallback loopback device: %s", loopback["name"])
-            return loopback
+        # Fallback: first available loopback
+        for lb in self._pa.get_loopback_device_info_generator():
+            logger.warning("Using fallback loopback device: %s", lb["name"])
+            return lb
 
         return None
 
-    def _resolve_input_device(self, device_cfg: str):
-        if device_cfg == "default":
-            return None, self._target_rate
+    # ------------------------------------------------------------------
+    # macOS / Linux stream (sounddevice)
+    # ------------------------------------------------------------------
 
-        import pyaudiowpatch as pyaudio
-        count = self._pa.get_device_count()
-        for i in range(count):
-            info = self._pa.get_device_info_by_index(i)
-            if info["name"] == device_cfg and info["maxInputChannels"] > 0:
-                return i, int(info["defaultSampleRate"])
+    def _open_streams_sounddevice(self):
+        import sounddevice as sd
+        from platform_utils import find_loopback_device_sounddevice
 
-        logger.warning("Mic device '%s' not found, using default", device_cfg)
-        return None, self._target_rate
+        mic_device_cfg = config.get("mic_device", "default")
+        loopback_device_cfg = config.get("speaker_device", "default")
+
+        mic_device = None if mic_device_cfg == "default" else mic_device_cfg
+
+        def mic_callback(indata, frames, time_info, status):
+            try:
+                mono = indata[:, 0] if indata.shape[1] > 1 else indata.ravel()
+                buf = (mono * 32767).astype(np.int16)
+                if not self._mic_queue.full():
+                    self._mic_queue.put_nowait(buf)
+            except Exception as e:
+                logger.warning("Mic callback error: %s", e)
+
+        self._sd_mic_stream = sd.InputStream(
+            device=mic_device,
+            samplerate=self._target_rate,
+            channels=1,
+            dtype="float32",
+            blocksize=CHUNK_FRAMES,
+            callback=mic_callback,
+        )
+        self._sd_mic_stream.start()
+        logger.info("Mic stream opened (sounddevice, device=%s)", mic_device_cfg)
+
+        # --- Loopback ---
+        if loopback_device_cfg == "default":
+            loopback_name = find_loopback_device_sounddevice()
+        else:
+            loopback_name = loopback_device_cfg
+
+        if loopback_name is None:
+            logger.warning(
+                "No loopback device found. "
+                "On macOS install BlackHole (https://existential.audio/blackhole/); "
+                "on Linux ensure PulseAudio monitor sources are available."
+            )
+        else:
+            def loopback_callback(indata, frames, time_info, status):
+                try:
+                    mono = indata[:, 0] if indata.shape[1] > 1 else indata.ravel()
+                    buf = (mono * 32767).astype(np.int16)
+                    if not self._loopback_queue.full():
+                        self._loopback_queue.put_nowait(buf)
+                except Exception as e:
+                    logger.warning("Loopback callback error: %s", e)
+
+            try:
+                self._sd_loopback_stream = sd.InputStream(
+                    device=loopback_name,
+                    samplerate=self._target_rate,
+                    channels=1,
+                    dtype="float32",
+                    blocksize=CHUNK_FRAMES,
+                    callback=loopback_callback,
+                )
+                self._sd_loopback_stream.start()
+                logger.info("Loopback stream opened (sounddevice, device=%s)", loopback_name)
+            except Exception as e:
+                logger.warning("Could not open loopback device '%s': %s — mic only", loopback_name, e)
+                self._sd_loopback_stream = None
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
 
     def _cleanup_streams(self):
+        # PyAudio streams (Windows)
         for stream in (self._mic_stream, self._loopback_stream):
             if stream is not None:
                 try:
@@ -295,16 +389,8 @@ class Recorder:
                     stream.close()
                 except Exception:
                     pass
-
         self._mic_stream = None
         self._loopback_stream = None
-
-        if self._sf_writer is not None:
-            try:
-                self._sf_writer.close()
-            except Exception:
-                pass
-            self._sf_writer = None
 
         if self._pa is not None:
             try:
@@ -313,7 +399,24 @@ class Recorder:
                 pass
             self._pa = None
 
-        # Drain queues
+        # sounddevice streams (macOS/Linux)
+        for stream in (self._sd_mic_stream, self._sd_loopback_stream):
+            if stream is not None:
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception:
+                    pass
+        self._sd_mic_stream = None
+        self._sd_loopback_stream = None
+
+        if self._sf_writer is not None:
+            try:
+                self._sf_writer.close()
+            except Exception:
+                pass
+            self._sf_writer = None
+
         for q in (self._mic_queue, self._loopback_queue):
             while not q.empty():
                 try:
@@ -322,47 +425,67 @@ class Recorder:
                     break
 
     # ------------------------------------------------------------------
-    # Mixer loop
+    # Mixer loop — real-time paced to fix the "few seconds" bug
     # ------------------------------------------------------------------
+    #
+    # Root cause: the old code used queue.get(timeout=0.5) for EACH queue.
+    # When the loopback queue was empty (no audio playing on the output
+    # device), every iteration blocked for ~1 second but only wrote
+    # 512/48000 ≈ 10ms of audio, making the file grow 94× slower than
+    # real-time. Fix: get_nowait() + sleep for the remainder of the
+    # chunk duration so the file always grows at real-time speed.
 
     def _mixer_loop(self):
         max_seconds = config.get("max_recording_hours", 4) * 3600
-        silence = np.zeros(CHUNK_FRAMES * self._channels, dtype=np.int16)
+        silence = np.zeros(CHUNK_FRAMES, dtype=np.int16)
+        chunk_duration = CHUNK_FRAMES / self._target_rate  # ~10.67ms at 48 kHz
 
-        while not self._stop_event.is_set():
-            # Auto-split check
-            if self.elapsed_seconds >= max_seconds:
-                logger.info("Max recording length reached, splitting file")
-                self._split_file()
+        try:
+            while not self._stop_event.is_set():
+                loop_start = time.monotonic()
 
-            mic_buf = self._get_or_silence(self._mic_queue, silence)
-            lb_buf = self._get_or_silence(self._loopback_queue, silence)
+                if self.elapsed_seconds >= max_seconds:
+                    logger.info("Max recording length reached, splitting file")
+                    self._split_file()
 
-            # Normalise lengths (edge case: resampling may produce slightly different sizes)
-            min_len = min(len(mic_buf), len(lb_buf))
-            mic_buf = mic_buf[:min_len]
-            lb_buf = lb_buf[:min_len]
-
-            mic_f = mic_buf.astype(np.float32) / 32768.0 * GAIN
-            lb_f = lb_buf.astype(np.float32) / 32768.0 * GAIN
-            mixed = np.clip(mic_f + lb_f, -1.0, 1.0)
-            out = (mixed * 32767).astype(np.int16)
-
-            if not self._paused and self._sf_writer is not None:
+                # Non-blocking reads; substitute silence when a stream has
+                # no data (e.g. loopback device quiet between call segments)
                 try:
+                    mic_buf = self._mic_queue.get_nowait()
+                except queue.Empty:
+                    mic_buf = silence.copy()
+
+                try:
+                    lb_buf = self._loopback_queue.get_nowait()
+                except queue.Empty:
+                    lb_buf = silence.copy()
+
+                # Align lengths (resampling may produce ±1 sample)
+                min_len = min(len(mic_buf), len(lb_buf))
+                mic_f = mic_buf[:min_len].astype(np.float32) / 32768.0 * GAIN
+                lb_f = lb_buf[:min_len].astype(np.float32) / 32768.0 * GAIN
+                out = (np.clip(mic_f + lb_f, -1.0, 1.0) * 32767).astype(np.int16)
+
+                if not self._paused and self._sf_writer is not None:
                     if self._channels == 1:
                         self._sf_writer.write(out)
                     else:
                         self._sf_writer.write(out.reshape(-1, self._channels))
-                except Exception as e:
-                    logger.error("Write error: %s", e)
-                    self._stop_event.set()
 
-    def _get_or_silence(self, q: queue.Queue, silence: np.ndarray) -> np.ndarray:
-        try:
-            return q.get(timeout=0.5)
-        except queue.Empty:
-            return silence.copy()
+                # Sleep for the remainder of this chunk period so the file
+                # grows at real-time speed even when streams are silent.
+                elapsed = time.monotonic() - loop_start
+                remaining = chunk_duration - elapsed
+                if remaining > 0:
+                    time.sleep(remaining)
+
+        except Exception as e:
+            logger.error("Mixer loop crashed: %s", e, exc_info=True)
+            self._stop_event.set()
+
+    # ------------------------------------------------------------------
+    # File management
+    # ------------------------------------------------------------------
 
     def _split_file(self):
         if self._sf_writer:
@@ -383,7 +506,10 @@ class Recorder:
         logger.info("Split to new file: %s", wav_path)
 
     def _new_wav_path(self, stem: str, part: Optional[int]) -> Path:
-        folder = config.get("output_folder", str(Path.home() / "Documents" / "Teams Recordings"))
+        folder = config.get(
+            "output_folder",
+            str(Path.home() / "Documents" / "Teams Recordings"),
+        )
         if part is not None:
             stem = f"{stem} (part_{part})"
         return unique_path(folder, stem, ".wav")
@@ -396,21 +522,17 @@ class Recorder:
     def _resample(buf: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
         try:
             import samplerate
-
             ratio = to_rate / from_rate
             floats = buf.astype(np.float32) / 32768.0
             resampled = samplerate.resample(floats, ratio, converter_type="sinc_fastest")
             return (resampled * 32767).astype(np.int16)
         except ImportError:
-            # Fallback: linear interpolation via numpy
             old_len = len(buf)
             new_len = int(round(old_len * to_rate / from_rate))
             x_old = np.linspace(0, 1, old_len)
             x_new = np.linspace(0, 1, new_len)
             return np.interp(x_new, x_old, buf.astype(np.float32)).astype(np.int16)
 
-    # ------------------------------------------------------------------
-    # Helpers
     # ------------------------------------------------------------------
 
     def _set_state(self, new_state: str):
@@ -419,7 +541,12 @@ class Recorder:
             self._on_state_change(new_state)
 
 
-def convert_to_mp3(wav_path: Path, on_done: Optional[Callable[[Optional[Path]], None]] = None):
+def convert_to_mp3(
+    wav_path: Path,
+    on_done: Optional[Callable[[Optional[Path]], None]] = None,
+):
+    import threading
+
     def _convert():
         try:
             from pydub import AudioSegment

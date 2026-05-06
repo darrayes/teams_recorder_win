@@ -86,7 +86,7 @@ class TrayIcon:
             name="TeamsRecorder",
             icon=self._icons["idle"],
             title="Idle — Auto-detect ON" if config.get("auto_detect") else "Idle",
-            menu=self._build_menu(),
+            menu=self._build_menu(),  # built once; callables keep it dynamic
         )
         self._stop_update.clear()
         self._update_thread = threading.Thread(
@@ -106,7 +106,10 @@ class TrayIcon:
         state = self._get_state()
         self._tray.icon = self._current_icon(state)
         self._tray.title = self._tooltip(state)
-        self._tray.menu = self._build_menu()
+        # Do NOT replace self._tray.menu here — pystray re-registers the
+        # Win32 menu on every assignment, which destroys the hover state
+        # while the menu is open.  The menu was built once with callable
+        # text/enabled/visible so pystray evaluates them at display time.
 
     def _current_icon(self, state: str) -> Image.Image:
         if state == RecorderState.RECORDING:
@@ -137,45 +140,37 @@ class TrayIcon:
             self._stop_update.wait(timeout=0.5)
 
     def _build_menu(self) -> pystray.Menu:
-        state = self._get_state()
-        is_recording = state == RecorderState.RECORDING
-        is_paused = state == RecorderState.PAUSED
-        is_active = is_recording or is_paused
-        auto = config.get("auto_detect", True)
+        # All dynamic properties use callables so pystray re-evaluates them
+        # at display time.  The menu object itself is never replaced, which
+        # prevents the Win32 menu from losing its hover state mid-display.
 
-        pause_label = "Resume" if is_paused else "Pause"
+        def _is_idle(_item=None):
+            return self._get_state() == RecorderState.IDLE
 
-        items = [
-            pystray.MenuItem(
-                "Start Recording",
-                self._handle_start,
-                enabled=not is_active,
-            ),
-            pystray.MenuItem(
-                "Stop Recording",
-                self._handle_stop,
-                enabled=is_active,
-            ),
-            pystray.MenuItem(
-                pause_label,
-                self._handle_pause_resume,
-                visible=is_active,
-            ),
+        def _is_active(_item=None):
+            return self._get_state() != RecorderState.IDLE
+
+        def _pause_label(_item=None):
+            return "Resume" if self._get_state() == RecorderState.PAUSED else "Pause"
+
+        def _autodetect_label(_item=None):
+            return f"Auto-Detect: {'ON' if config.get('auto_detect') else 'OFF'}"
+
+        return pystray.Menu(
+            pystray.MenuItem("Start Recording", self._handle_start, enabled=_is_idle),
+            pystray.MenuItem("Stop Recording", self._handle_stop, enabled=_is_active),
+            pystray.MenuItem(_pause_label, self._handle_pause_resume, visible=_is_active),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Open Recordings Folder", self._handle_open_folder),
             pystray.MenuItem("Settings...", self._handle_settings),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem(
-                f"Auto-Detect: {'ON' if auto else 'OFF'}",
-                self._handle_toggle_autodetect,
-            ),
+            pystray.MenuItem(_autodetect_label, self._handle_toggle_autodetect),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("View Log", self._handle_view_log),
             pystray.MenuItem("About", self._handle_about),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self._handle_quit),
-        ]
-        return pystray.Menu(*items)
+        )
 
     # --- Handlers (called on pystray's thread; dispatch as needed) ---
 

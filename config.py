@@ -45,8 +45,8 @@ class Config:
         return cls._instance
 
     def load(self):
-        appdata = os.environ.get("APPDATA", str(Path.home()))
-        config_dir = Path(appdata) / "TeamsRecorder"
+        from platform_utils import get_config_dir
+        config_dir = get_config_dir()
         config_dir.mkdir(parents=True, exist_ok=True)
         self._path = config_dir / "config.json"
 

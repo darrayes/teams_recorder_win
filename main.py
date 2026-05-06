@@ -11,21 +11,26 @@ Launch order:
   7. Start tray (blocks until quit)
 """
 
-import ctypes
 import logging
 import logging.handlers
 import os
 import sys
-import threading
 import webbrowser
 from pathlib import Path
 from tkinter import messagebox
 import tkinter as tk
+
 from config import config
+from platform_utils import (
+    PLATFORM,
+    acquire_single_instance,
+    release_single_instance,
+    get_config_dir,
+    open_path,
+)
 
 APP_NAME = "Teams Recorder"
 APP_VERSION = "1.0.0"
-MUTEX_NAME = "TeamsRecorderSingleInstance"
 
 # ---------------------------------------------------------------------------
 # Logging setup (called before config so we can log config load errors)
@@ -42,36 +47,11 @@ def _setup_logging(log_path: Path):
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     root.addHandler(handler)
-    # Also log to stderr in debug mode
     if os.environ.get("TEAMS_REC_DEBUG"):
         root.addHandler(logging.StreamHandler(sys.stderr))
 
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Single-instance lock
-# ---------------------------------------------------------------------------
-
-_mutex_handle = None
-
-
-def _acquire_single_instance() -> bool:
-    global _mutex_handle
-    kernel32 = ctypes.windll.kernel32
-    _mutex_handle = kernel32.CreateMutexW(None, False, MUTEX_NAME)
-    last_err = kernel32.GetLastError()
-    if last_err == 183:  # ERROR_ALREADY_EXISTS
-        return False
-    return True
-
-
-def _release_single_instance():
-    global _mutex_handle
-    if _mutex_handle:
-        ctypes.windll.kernel32.CloseHandle(_mutex_handle)
-        _mutex_handle = None
 
 
 # ---------------------------------------------------------------------------
@@ -196,15 +176,14 @@ def notify(title: str, message: str):
 
 
 def main():
-    # --- Logging (temporary path until config loads) ---
-    appdata = os.environ.get("APPDATA", str(Path.home()))
-    early_log = Path(appdata) / "TeamsRecorder" / "app.log"
+    # --- Logging (early path before config loads) ---
+    early_log = get_config_dir() / "app.log"
     _setup_logging(early_log)
 
-    logger.info("Teams Recorder %s starting", APP_VERSION)
+    logger.info("Teams Recorder %s starting (platform=%s)", APP_VERSION, PLATFORM)
 
     # --- Single instance ---
-    if not _acquire_single_instance():
+    if not acquire_single_instance():
         root = tk.Tk()
         root.withdraw()
         messagebox.showinfo(APP_NAME, "Teams Recorder is already running.")
@@ -280,7 +259,7 @@ def main():
             "output_folder", str(Path.home() / "Documents" / "Teams Recordings")
         )
         Path(folder).mkdir(parents=True, exist_ok=True)
-        os.startfile(folder)
+        open_path(folder)
 
     def open_settings():
         from settings_window import open_settings as _open
@@ -298,7 +277,7 @@ def main():
 
     def view_log():
         if config.log_path.exists():
-            os.startfile(str(config.log_path))
+            open_path(config.log_path)
 
     def show_about():
         root = tk.Tk()
@@ -320,7 +299,7 @@ def main():
         detector.stop()
         if recorder.state != RecorderState.IDLE:
             _finish_recording(recorder)
-        _release_single_instance()
+        release_single_instance()
         tray.stop()
 
     # --- Tray icon ---

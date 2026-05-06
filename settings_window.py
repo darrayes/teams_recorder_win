@@ -1,18 +1,24 @@
 import logging
 import os
+import sys
 import tkinter as tk
-import winreg
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Optional
 
 from config import config
+from platform_utils import PLATFORM, set_startup
 from utils import preview_filename
 
 logger = logging.getLogger(__name__)
 
 APP_NAME = "TeamsRecorder"
-RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+# Startup label is platform-aware
+_STARTUP_LABEL = {
+    "Windows": "Start with Windows",
+    "Darwin": "Launch at Login (macOS)",
+}.get(PLATFORM, "Launch at Login")
 
 
 def open_settings(parent=None):
@@ -30,12 +36,15 @@ class SettingsWindow:
     def show(self):
         self._working = config.as_dict()
 
+        # Keep a separate reference to the Tk root so we can destroy it on
+        # close — without this the hidden root leaks and mainloop never exits.
+        self._tk_root: Optional[tk.Tk] = None
         if self._parent:
             self._root = tk.Toplevel(self._parent)
         else:
-            self._root = tk.Tk()
-            self._root.withdraw()
-            self._root = tk.Toplevel()
+            self._tk_root = tk.Tk()
+            self._tk_root.withdraw()
+            self._root = tk.Toplevel(self._tk_root)
 
         self._root.title("Teams Recorder — Settings")
         self._root.resizable(False, False)
@@ -51,7 +60,10 @@ class SettingsWindow:
 
         self._build_buttons(self._root)
         self._root.protocol("WM_DELETE_WINDOW", self._on_cancel)
-        self._root.mainloop()
+        # wait_window blocks until this specific window is destroyed,
+        # unlike mainloop() which blocks until ALL windows are gone.
+        self._root.wait_window()
+        self._destroy_root()
 
     # ------------------------------------------------------------------
     # Tab builders
@@ -217,7 +229,7 @@ class SettingsWindow:
 
         startup_var = tk.BooleanVar(value=self._working.get("start_with_windows", False))
         self._vars["start_with_windows"] = startup_var
-        ttk.Checkbutton(frame, text="Start with Windows", variable=startup_var).grid(
+        ttk.Checkbutton(frame, text=_STARTUP_LABEL, variable=startup_var).grid(
             row=0, column=0, columnspan=2, sticky="w", pady=4
         )
 
@@ -251,12 +263,20 @@ class SettingsWindow:
         if chosen:
             self._vars["output_folder"].set(chosen)
 
+    def _destroy_root(self):
+        if self._tk_root is not None:
+            try:
+                self._tk_root.destroy()
+            except Exception:
+                pass
+            self._tk_root = None
+
     def _on_save(self):
         updates = self._collect_values()
         if updates is None:
             return
         config.update_from_dict(updates)
-        _apply_startup(updates.get("start_with_windows", False))
+        set_startup(updates.get("start_with_windows", False))
         logger.info("Settings saved")
         self._root.destroy()
 
@@ -303,7 +323,6 @@ class SettingsWindow:
 
 def _ffmpeg_available() -> bool:
     import shutil
-    from pydub.utils import get_encoder_name
     ffmpeg_path = config.get("ffmpeg_path", "")
     if ffmpeg_path and Path(ffmpeg_path).exists():
         return True
@@ -311,48 +330,30 @@ def _ffmpeg_available() -> bool:
 
 
 def _list_input_devices() -> list[str]:
-    devices = ["default"]
-    try:
-        import pyaudiowpatch as pyaudio
-        p = pyaudio.PyAudio()
-        for i in range(p.get_device_count()):
-            info = p.get_device_info_by_index(i)
-            if info["maxInputChannels"] > 0:
-                devices.append(info["name"])
-        p.terminate()
-    except Exception as e:
-        logger.warning("Could not enumerate input devices: %s", e)
-    return devices
+    if PLATFORM == "Windows":
+        return _list_devices_windows(input=True)
+    from platform_utils import list_input_devices_sounddevice
+    return list_input_devices_sounddevice()
 
 
 def _list_output_devices() -> list[str]:
+    if PLATFORM == "Windows":
+        return _list_devices_windows(input=False)
+    from platform_utils import list_output_devices_sounddevice
+    return list_output_devices_sounddevice()
+
+
+def _list_devices_windows(input: bool) -> list[str]:
     devices = ["default"]
     try:
         import pyaudiowpatch as pyaudio
         p = pyaudio.PyAudio()
+        key = "maxInputChannels" if input else "maxOutputChannels"
         for i in range(p.get_device_count()):
             info = p.get_device_info_by_index(i)
-            if info["maxOutputChannels"] > 0:
+            if info[key] > 0:
                 devices.append(info["name"])
         p.terminate()
     except Exception as e:
-        logger.warning("Could not enumerate output devices: %s", e)
+        logger.warning("Could not enumerate devices: %s", e)
     return devices
-
-
-def _apply_startup(enable: bool):
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE)
-        if enable:
-            exe = sys.executable
-            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, f'"{exe}"')
-            logger.info("Added to startup: %s", exe)
-        else:
-            try:
-                winreg.DeleteValue(key, APP_NAME)
-                logger.info("Removed from startup")
-            except FileNotFoundError:
-                pass
-        winreg.CloseKey(key)
-    except OSError as e:
-        logger.warning("Registry startup update failed: %s", e)
