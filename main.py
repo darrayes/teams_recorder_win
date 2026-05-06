@@ -21,6 +21,7 @@ import webbrowser
 from pathlib import Path
 from tkinter import messagebox
 import tkinter as tk
+from config import config
 
 APP_NAME = "Teams Recorder"
 APP_VERSION = "1.0.0"
@@ -29,6 +30,7 @@ MUTEX_NAME = "TeamsRecorderSingleInstance"
 # ---------------------------------------------------------------------------
 # Logging setup (called before config so we can log config load errors)
 # ---------------------------------------------------------------------------
+
 
 def _setup_logging(log_path: Path):
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -54,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 _mutex_handle = None
 
+
 def _acquire_single_instance() -> bool:
     global _mutex_handle
     kernel32 = ctypes.windll.kernel32
@@ -75,6 +78,7 @@ def _release_single_instance():
 # ffmpeg path setup
 # ---------------------------------------------------------------------------
 
+
 def _setup_ffmpeg():
     from pydub import AudioSegment
 
@@ -93,6 +97,7 @@ def _setup_ffmpeg():
         return
 
     import shutil
+
     if shutil.which("ffmpeg"):
         logger.info("ffmpeg found on PATH")
         return
@@ -103,6 +108,7 @@ def _setup_ffmpeg():
 # ---------------------------------------------------------------------------
 # First-run consent dialog
 # ---------------------------------------------------------------------------
+
 
 def _show_consent_if_needed():
     if not config.get("first_run", True):
@@ -131,6 +137,7 @@ def _show_consent_if_needed():
 # ---------------------------------------------------------------------------
 # Orphaned WAV recovery
 # ---------------------------------------------------------------------------
+
 
 def _check_orphaned_wav():
     if not config.get("recording_in_progress", False):
@@ -166,11 +173,13 @@ def _check_orphaned_wav():
 # Notification helper
 # ---------------------------------------------------------------------------
 
+
 def notify(title: str, message: str):
     if not config.get("show_notifications", True):
         return
     try:
         from plyer import notification
+
         notification.notify(
             app_name=APP_NAME,
             title=title,
@@ -184,6 +193,7 @@ def notify(title: str, message: str):
 # ---------------------------------------------------------------------------
 # Main application wiring
 # ---------------------------------------------------------------------------
+
 
 def main():
     # --- Logging (temporary path until config loads) ---
@@ -202,7 +212,6 @@ def main():
         sys.exit(0)
 
     # --- Config ---
-    from config import config
     config.load()
     _setup_logging(config.log_path)  # re-init with correct path
 
@@ -267,12 +276,15 @@ def main():
             recorder.resume()
 
     def open_folder():
-        folder = config.get("output_folder", str(Path.home() / "Documents" / "Teams Recordings"))
+        folder = config.get(
+            "output_folder", str(Path.home() / "Documents" / "Teams Recordings")
+        )
         Path(folder).mkdir(parents=True, exist_ok=True)
         os.startfile(folder)
 
     def open_settings():
         from settings_window import open_settings as _open
+
         _open()
 
     def toggle_autodetect():
@@ -337,6 +349,7 @@ def main():
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _finish_recording(recorder):
     from recorder import convert_to_mp3
 
@@ -346,11 +359,14 @@ def _finish_recording(recorder):
 
     fmt = config.get("file_format", "wav")
     if fmt == "mp3":
+
         def _on_converted(mp3_path):
             if mp3_path:
                 notify(APP_NAME, f"Recording saved: {mp3_path.name}")
             else:
-                notify(APP_NAME, f"Saved as WAV (MP3 conversion failed): {wav_path.name}")
+                notify(
+                    APP_NAME, f"Saved as WAV (MP3 conversion failed): {wav_path.name}"
+                )
 
         convert_to_mp3(wav_path, on_done=_on_converted)
     else:

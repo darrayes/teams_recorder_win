@@ -10,7 +10,7 @@ CURRENT_CONFIG_VERSION = 1
 DEFAULTS = {
     "config_version": CURRENT_CONFIG_VERSION,
     "output_folder": str(Path.home() / "Documents" / "Teams Recordings"),
-    "file_format": "mp3",
+    "file_format": "wav",
     "mp3_bitrate": 128,
     "filename_template": "TeamsCall_{date}_{time}",
     "date_format": "YYYYMMDD",
@@ -69,7 +69,11 @@ class Config:
     def _migrate(self):
         version = self._data.get("config_version", 0)
         if version < CURRENT_CONFIG_VERSION:
-            logger.info("Migrating config from version %d to %d", version, CURRENT_CONFIG_VERSION)
+            logger.info(
+                "Migrating config from version %d to %d",
+                version,
+                CURRENT_CONFIG_VERSION,
+            )
             self._data["config_version"] = CURRENT_CONFIG_VERSION
             self.save()
 
@@ -90,7 +94,9 @@ class Config:
 
     def reset_to_defaults(self):
         self._data = dict(DEFAULTS)
-        self._data["output_folder"] = str(Path.home() / "Documents" / "Teams Recordings")
+        self._data["output_folder"] = str(
+            Path.home() / "Documents" / "Teams Recordings"
+        )
         self.save()
 
     def as_dict(self):
