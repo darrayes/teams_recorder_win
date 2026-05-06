@@ -2,6 +2,7 @@ import logging
 import threading
 from typing import Callable, Optional
 
+from config import config
 from platform_utils import PLATFORM
 
 logger = logging.getLogger(__name__)
@@ -9,7 +10,6 @@ logger = logging.getLogger(__name__)
 TEAMS_PROCESS_NAMES = {"teams", "teams.exe", "ms-teams.exe", "msteams.exe", "msteams"}
 POLL_INTERVAL = 2.0
 ACTIVE_THRESHOLD = 2    # consecutive active checks before triggering start
-INACTIVE_THRESHOLD = 5  # consecutive inactive checks before triggering stop
 
 
 class Detector:
@@ -66,7 +66,7 @@ class Detector:
                 except Exception as e:
                     logger.error("on_call_start error: %s", e)
 
-            elif self._in_call and self._inactive_count >= INACTIVE_THRESHOLD:
+            elif self._in_call and self._inactive_seconds() >= self._stop_delay_seconds():
                 self._in_call = False
                 self._active_count = 0
                 logger.info("Teams audio gone — triggering recording stop")
@@ -76,6 +76,15 @@ class Detector:
                     logger.error("on_call_end error: %s", e)
 
             self._stop_event.wait(timeout=POLL_INTERVAL)
+
+    def _inactive_seconds(self) -> float:
+        return self._inactive_count * POLL_INTERVAL
+
+    def _stop_delay_seconds(self) -> float:
+        try:
+            return max(float(config.get("auto_stop_delay_seconds", 10)), POLL_INTERVAL)
+        except (TypeError, ValueError):
+            return 10.0
 
     def _is_teams_audio_active(self) -> bool:
         if PLATFORM == "Windows":

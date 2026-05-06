@@ -48,7 +48,10 @@ class SettingsWindow:
 
         self._root.title("Teams Recorder — Settings")
         self._root.resizable(False, False)
-        self._root.grab_set()
+        try:
+            self._root.grab_set()
+        except tk.TclError:
+            pass
 
         nb = ttk.Notebook(self._root)
         nb.pack(fill="both", expand=True, padx=8, pady=8)
@@ -322,6 +325,7 @@ class SettingsWindow:
     def _on_reset(self):
         if messagebox.askyesno("Reset", "Reset all settings to defaults?", parent=self._root):
             config.reset_to_defaults()
+            set_startup(False)
             self._root.destroy()
             logger.info("Settings reset to defaults")
 

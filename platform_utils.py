@@ -147,11 +147,13 @@ def _set_startup_windows(enable: bool, exe: str):
 
 
 def _set_startup_macos(enable: bool, exe: str):
+    import html as _html
     plist_dir = Path.home() / "Library" / "LaunchAgents"
     plist_path = plist_dir / f"com.{APP_NAME.lower()}.plist"
 
     if enable:
         plist_dir.mkdir(parents=True, exist_ok=True)
+        exe_escaped = _html.escape(exe, quote=False)
         plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -161,7 +163,7 @@ def _set_startup_macos(enable: bool, exe: str):
     <string>com.{APP_NAME.lower()}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{exe}</string>
+        <string>{exe_escaped}</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

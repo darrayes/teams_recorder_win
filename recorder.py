@@ -49,6 +49,7 @@ class Recorder:
         self._sf_writer: Optional[sf.SoundFile] = None
 
         self._current_wav_path: Optional[Path] = None
+        self._wav_parts: list[Path] = []
         self._start_time: Optional[float] = None
         self._part_index = 0
         self._base_stem: Optional[str] = None
@@ -92,6 +93,7 @@ class Recorder:
         self._part_index = 1
         wav_path = self._new_wav_path(stem, part=None)
         self._current_wav_path = wav_path
+        self._wav_parts = [wav_path]
 
         try:
             self._sf_writer = sf.SoundFile(
@@ -123,7 +125,7 @@ class Recorder:
         logger.info("Recording started → %s", wav_path)
         return True
 
-    def stop_recording(self) -> Optional[Path]:
+    def stop_recording(self) -> Optional[list[Path]]:
         if self._state == RecorderState.IDLE:
             return None
 
@@ -134,8 +136,9 @@ class Recorder:
             self._mixer_thread.join(timeout=5)
 
         self._cleanup_streams()
-        wav_path = self._current_wav_path
+        wav_paths = list(self._wav_parts)
         self._current_wav_path = None
+        self._wav_parts = []
         self._start_time = None
 
         config.set("recording_in_progress", False)
@@ -143,8 +146,8 @@ class Recorder:
         config.save()
 
         self._set_state(RecorderState.IDLE)
-        logger.info("Recording stopped, WAV saved: %s", wav_path)
-        return wav_path
+        logger.info("Recording stopped, WAV saved: %s", wav_paths)
+        return wav_paths
 
     def pause(self):
         if self._state != RecorderState.RECORDING:
@@ -180,11 +183,10 @@ class Recorder:
 
         def mic_cb(in_data, frame_count, time_info, status):
             try:
-                buf = np.frombuffer(in_data, dtype=np.int16).copy()
-                if mic_native_ch > 1 and self._channels == 1:
-                    buf = buf.reshape(-1, mic_native_ch).mean(axis=1).astype(np.int16)
+                buf = np.frombuffer(in_data, dtype=np.int16).copy().reshape(-1, mic_native_ch)
                 if mic_native_rate != self._target_rate:
                     buf = self._resample(buf, mic_native_rate, self._target_rate)
+                buf = self._match_channels(buf, self._channels)
                 if not self._mic_queue.full():
                     self._mic_queue.put_nowait(buf)
             except Exception as e:
@@ -219,11 +221,10 @@ class Recorder:
 
             def loopback_cb(in_data, frame_count, time_info, status):
                 try:
-                    buf = np.frombuffer(in_data, dtype=np.int16).copy()
-                    if loopback_ch > 1 and self._channels == 1:
-                        buf = buf.reshape(-1, loopback_ch).mean(axis=1).astype(np.int16)
+                    buf = np.frombuffer(in_data, dtype=np.int16).copy().reshape(-1, loopback_ch)
                     if loopback_rate != self._target_rate:
                         buf = self._resample(buf, loopback_rate, self._target_rate)
+                    buf = self._match_channels(buf, self._channels)
                     if not self._loopback_queue.full():
                         self._loopback_queue.put_nowait(buf)
                 except Exception as e:
@@ -321,8 +322,8 @@ class Recorder:
 
         def mic_callback(indata, frames, time_info, status):
             try:
-                mono = indata[:, 0] if indata.shape[1] > 1 else indata.ravel()
-                buf = (mono * 32767).astype(np.int16)
+                buf = (indata * 32767).astype(np.int16)
+                buf = self._match_channels(buf, self._channels)
                 if not self._mic_queue.full():
                     self._mic_queue.put_nowait(buf)
             except Exception as e:
@@ -354,8 +355,8 @@ class Recorder:
         else:
             def loopback_callback(indata, frames, time_info, status):
                 try:
-                    mono = indata[:, 0] if indata.shape[1] > 1 else indata.ravel()
-                    buf = (mono * 32767).astype(np.int16)
+                    buf = (indata * 32767).astype(np.int16)
+                    buf = self._match_channels(buf, self._channels)
                     if not self._loopback_queue.full():
                         self._loopback_queue.put_nowait(buf)
                 except Exception as e:
@@ -437,7 +438,7 @@ class Recorder:
 
     def _mixer_loop(self):
         max_seconds = config.get("max_recording_hours", 4) * 3600
-        silence = np.zeros(CHUNK_FRAMES, dtype=np.int16)
+        silence = np.zeros((CHUNK_FRAMES, self._channels), dtype=np.int16)
         chunk_duration = CHUNK_FRAMES / self._target_rate  # ~10.67ms at 48 kHz
 
         try:
@@ -461,16 +462,16 @@ class Recorder:
                     lb_buf = silence.copy()
 
                 # Align lengths (resampling may produce ±1 sample)
-                min_len = min(len(mic_buf), len(lb_buf))
+                min_len = min(mic_buf.shape[0], lb_buf.shape[0])
                 mic_f = mic_buf[:min_len].astype(np.float32) / 32768.0 * GAIN
                 lb_f = lb_buf[:min_len].astype(np.float32) / 32768.0 * GAIN
                 out = (np.clip(mic_f + lb_f, -1.0, 1.0) * 32767).astype(np.int16)
 
                 if not self._paused and self._sf_writer is not None:
                     if self._channels == 1:
-                        self._sf_writer.write(out)
+                        self._sf_writer.write(out[:, 0])
                     else:
-                        self._sf_writer.write(out.reshape(-1, self._channels))
+                        self._sf_writer.write(out)
 
                 # Sleep for the remainder of this chunk period so the file
                 # grows at real-time speed even when streams are silent.
@@ -493,6 +494,7 @@ class Recorder:
         self._part_index += 1
         wav_path = self._new_wav_path(self._base_stem, part=self._part_index)
         self._current_wav_path = wav_path
+        self._wav_parts.append(wav_path)
         config.set("recording_temp_path", str(wav_path))
         config.save()
         self._sf_writer = sf.SoundFile(
@@ -520,18 +522,40 @@ class Recorder:
 
     @staticmethod
     def _resample(buf: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
+        was_1d = buf.ndim == 1
+        if was_1d:
+            buf = buf.reshape(-1, 1)
         try:
             import samplerate
             ratio = to_rate / from_rate
             floats = buf.astype(np.float32) / 32768.0
             resampled = samplerate.resample(floats, ratio, converter_type="sinc_fastest")
-            return (resampled * 32767).astype(np.int16)
+            out = (resampled * 32767).astype(np.int16)
         except ImportError:
-            old_len = len(buf)
+            old_len = buf.shape[0]
             new_len = int(round(old_len * to_rate / from_rate))
             x_old = np.linspace(0, 1, old_len)
             x_new = np.linspace(0, 1, new_len)
-            return np.interp(x_new, x_old, buf.astype(np.float32)).astype(np.int16)
+            channels = [
+                np.interp(x_new, x_old, buf[:, ch].astype(np.float32))
+                for ch in range(buf.shape[1])
+            ]
+            out = np.stack(channels, axis=1).astype(np.int16)
+        return out.ravel() if was_1d else out
+
+    @staticmethod
+    def _match_channels(buf: np.ndarray, channels: int) -> np.ndarray:
+        if buf.ndim == 1:
+            buf = buf.reshape(-1, 1)
+        if channels == 1:
+            if buf.shape[1] == 1:
+                return buf
+            return buf.mean(axis=1, keepdims=True).astype(np.int16)
+        if buf.shape[1] == channels:
+            return buf
+        if buf.shape[1] == 1:
+            return np.repeat(buf, channels, axis=1)
+        return buf[:, :channels]
 
     # ------------------------------------------------------------------
 
