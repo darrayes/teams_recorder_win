@@ -1,0 +1,10 @@
+pyaudiowpatch>=0.2.12
+soundfile>=0.12.1
+samplerate>=0.2.1
+numpy>=1.26.0
+pystray>=0.19.5
+Pillow>=10.0.0
+pycaw>=20240210
+comtypes>=1.2.0
+pydub>=0.25.1
+plyer>=2.1.0
