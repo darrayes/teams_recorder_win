@@ -175,41 +175,11 @@ class Recorder:
         loopback_device_cfg = config.get("speaker_device", "default")
 
         # --- Mic stream ---
-        # Discover the native channel count so we don't force mono on a
-        # device that only supports stereo — downmix happens in the callback.
-        mic_idx, mic_native_ch, mic_native_rate = self._query_input_device_windows(
-            mic_device_cfg
-        )
-
-        def mic_cb(in_data, frame_count, time_info, status):
-            try:
-                buf = np.frombuffer(in_data, dtype=np.int16).copy().reshape(-1, mic_native_ch)
-                if mic_native_rate != self._target_rate:
-                    buf = self._resample(buf, mic_native_rate, self._target_rate)
-                buf = self._match_channels(buf, self._channels)
-                if not self._mic_queue.full():
-                    self._mic_queue.put_nowait(buf)
-            except Exception as e:
-                logger.warning("Mic callback error: %s", e)
-            return (None, pyaudio.paContinue)
-
-        mic_kwargs = dict(
-            format=pyaudio.paInt16,
-            channels=mic_native_ch,
-            rate=mic_native_rate,
-            input=True,
-            frames_per_buffer=CHUNK_FRAMES,
-            stream_callback=mic_cb,
-        )
-        if mic_idx is not None:
-            mic_kwargs["input_device_index"] = mic_idx
-
-        self._mic_stream = self._pa.open(**mic_kwargs)
-        self._mic_stream.start_stream()
-        logger.info(
-            "Mic stream opened (device=%s, rate=%d, ch=%d)",
-            mic_device_cfg, mic_native_rate, mic_native_ch,
-        )
+        # Use WASAPI shared mode so Teams can keep using the microphone.
+        # If this fails, record loopback only rather than falling back to a
+        # capture mode that might make the mic unavailable to Teams.
+        if not self._open_mic_stream_windows_shared(mic_device_cfg):
+            logger.warning("Mic capture disabled because shared-mode open failed")
 
         # --- Loopback stream ---
         loopback_device = self._find_loopback_device_windows(loopback_device_cfg)
@@ -246,37 +216,80 @@ class Recorder:
                 loopback_device["name"], loopback_rate, loopback_ch,
             )
 
-    def _query_input_device_windows(self, device_cfg: str):
-        """Return (device_index, native_channels, native_rate) for an input device."""
-        import pyaudiowpatch as pyaudio
+    def _open_mic_stream_windows_shared(self, device_cfg: str) -> bool:
+        try:
+            import sounddevice as sd
+        except ImportError:
+            return False
+
+        try:
+            mic_device = self._find_sounddevice_input(device_cfg)
+            extra_settings = None
+            if hasattr(sd, "WasapiSettings"):
+                extra_settings = sd.WasapiSettings(exclusive=False, auto_convert=True)
+
+            def mic_callback(indata, frames, time_info, status):
+                try:
+                    buf = (indata * 32767).astype(np.int16)
+                    buf = self._match_channels(buf, self._channels)
+                    if not self._mic_queue.full():
+                        self._mic_queue.put_nowait(buf)
+                except Exception as e:
+                    logger.warning("Mic callback error: %s", e)
+
+            kwargs = dict(
+                device=mic_device,
+                samplerate=self._target_rate,
+                channels=1,
+                dtype="float32",
+                blocksize=CHUNK_FRAMES,
+                callback=mic_callback,
+            )
+            if extra_settings is not None:
+                kwargs["extra_settings"] = extra_settings
+
+            self._sd_mic_stream = sd.InputStream(**kwargs)
+            self._sd_mic_stream.start()
+            logger.info("Mic stream opened in WASAPI shared mode (device=%s)", device_cfg)
+            return True
+        except Exception as e:
+            logger.warning("Shared-mode mic open failed: %s", e)
+            self._sd_mic_stream = None
+            return False
+
+    def _find_sounddevice_input(self, device_cfg: str):
+        import sounddevice as sd
+
+        wasapi_hostapis = [
+            index for index, info in enumerate(sd.query_hostapis())
+            if "wasapi" in str(info.get("name", "")).lower()
+        ]
 
         if device_cfg == "default":
-            try:
-                wasapi = self._pa.get_host_api_info_by_type(pyaudio.paWASAPI)
-                idx = wasapi.get("defaultInputDevice")
-                if idx is not None:
-                    info = self._pa.get_device_info_by_index(idx)
-                    return (
-                        idx,
-                        int(info.get("maxInputChannels", 1)),
-                        int(info["defaultSampleRate"]),
-                    )
-            except Exception:
-                pass
-            return None, 1, self._target_rate
+            for hostapi_index in wasapi_hostapis:
+                info = sd.query_hostapis(hostapi_index)
+                device_index = info.get("default_input_device", -1)
+                if device_index is not None and device_index >= 0:
+                    return device_index
+            return None
 
-        count = self._pa.get_device_count()
-        for i in range(count):
-            info = self._pa.get_device_info_by_index(i)
-            if info["name"] == device_cfg and info["maxInputChannels"] > 0:
-                return (
-                    i,
-                    int(info["maxInputChannels"]),
-                    int(info["defaultSampleRate"]),
-                )
+        device_cfg_lower = device_cfg.lower()
+        fallback_index = None
+        for index, info in enumerate(sd.query_devices()):
+            if info.get("max_input_channels", 0) <= 0:
+                continue
+            name = str(info.get("name", ""))
+            if name == device_cfg or name.lower() in device_cfg_lower or device_cfg_lower in name.lower():
+                if info.get("hostapi") in wasapi_hostapis:
+                    return index
+                if fallback_index is None:
+                    fallback_index = index
 
-        logger.warning("Mic device '%s' not found, using default", device_cfg)
-        return None, 1, self._target_rate
+        if fallback_index is not None:
+            return fallback_index
+
+        logger.warning("Mic device '%s' not found via sounddevice, using default", device_cfg)
+        return None
 
     def _find_loopback_device_windows(self, speaker_cfg: str):
         import pyaudiowpatch as pyaudio

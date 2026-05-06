@@ -80,6 +80,7 @@ class TrayIcon:
         self._tray: Optional[pystray.Icon] = None
         self._update_thread: Optional[threading.Thread] = None
         self._stop_update = threading.Event()
+        self._last_menu_signature = None
 
     def run(self):
         self._tray = pystray.Icon(
@@ -106,6 +107,13 @@ class TrayIcon:
         state = self._get_state()
         self._tray.icon = self._current_icon(state)
         self._tray.title = self._tooltip(state)
+        menu_signature = (state, bool(config.get("auto_detect")))
+        if menu_signature != self._last_menu_signature:
+            self._last_menu_signature = menu_signature
+            try:
+                self._tray.update_menu()
+            except Exception as e:
+                logger.debug("Tray menu refresh failed: %s", e)
         # Do NOT replace self._tray.menu here — pystray re-registers the
         # Win32 menu on every assignment, which destroys the hover state
         # while the menu is open.  The menu was built once with callable
