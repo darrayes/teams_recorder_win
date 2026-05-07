@@ -55,6 +55,9 @@ The app launches silently into the system tray (bottom-right of the taskbar).
 | Start recording | Right-click tray icon → **Start Recording**, or left-click the icon |
 | Stop recording | Right-click → **Stop Recording**, or left-click again |
 | Pause / Resume | Right-click → **Pause** / **Resume** (only visible while recording) |
+| Shortcut: Start / Stop | `Ctrl` + `Alt` + `R` |
+| Shortcut: Pause / Resume | `Ctrl` + `Alt` + `P` |
+| Shortcut: Show / Hide floating bar | `Ctrl` + `Alt` + `B` |
 | Open recordings folder | Right-click → **Open Recordings Folder** |
 | Change settings | Right-click → **Settings…** |
 | Toggle auto-detect | Right-click → **Auto-Detect: ON/OFF** |
@@ -94,6 +97,8 @@ Open via right-click → **Settings…**
 | Max recording length | 4 hours (auto-splits) |
 | Start with Windows | Off |
 | Show notifications | On |
+| Enable shortcuts | On |
+| Show floating bar | On |
 
 ### Filename template placeholders
 

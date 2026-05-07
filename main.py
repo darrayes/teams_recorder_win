@@ -265,6 +265,12 @@ def main() -> None:
             return
         _dispatch(lambda: _finish_recording(recorder))
 
+    def toggle_recording() -> None:
+        if recorder.state == RecorderState.IDLE:
+            start_recording()
+        else:
+            stop_recording()
+
     def pause_resume() -> None:
         if recorder.state == RecorderState.RECORDING:
             recorder.pause()
@@ -280,7 +286,12 @@ def main() -> None:
 
     def open_settings() -> None:
         from settings_window import open_settings as _open
-        _dispatch(lambda: _open(parent=_tk_root))
+
+        def _show_settings() -> None:
+            _open(parent=_tk_root)
+            _sync_controls_from_config()
+
+        _dispatch(_show_settings)
 
     def toggle_autodetect() -> None:
         new_val = not config.get("auto_detect", True)
@@ -310,6 +321,7 @@ def main() -> None:
     def quit_app() -> None:
         def _do_quit() -> None:
             logger.info("Quitting")
+            hotkeys.stop()
             detector.stop()
             if recorder.state != RecorderState.IDLE:
                 _finish_recording(recorder)
@@ -320,6 +332,34 @@ def main() -> None:
         _dispatch(_do_quit)
 
     from tray_icon import TrayIcon
+    from floating_bar import FloatingBar
+    from hotkeys import HotkeyManager
+
+    floating_bar = FloatingBar(
+        parent=_tk_root,
+        on_start=start_recording,
+        on_stop=stop_recording,
+        on_pause_resume=pause_resume,
+        get_state=lambda: recorder.state,
+        get_elapsed=lambda: recorder.elapsed_seconds,
+    )
+
+    hotkeys = HotkeyManager(
+        on_toggle_recording=lambda: _dispatch(toggle_recording),
+        on_pause_resume=lambda: _dispatch(pause_resume),
+        on_toggle_floating_bar=lambda: _dispatch(floating_bar.toggle),
+    )
+
+    def _sync_controls_from_config() -> None:
+        if config.get("show_floating_bar", True):
+            floating_bar.show()
+        else:
+            floating_bar.hide()
+
+        if config.get("enable_hotkeys", True):
+            hotkeys.start()
+        else:
+            hotkeys.stop()
 
     tray = TrayIcon(
         on_start=start_recording,
@@ -334,6 +374,8 @@ def main() -> None:
         get_recorder_state=lambda: recorder.state,
         get_elapsed=lambda: recorder.elapsed_seconds,
     )
+
+    _sync_controls_from_config()
 
     # Run pystray in a daemon thread so the main thread is free to run
     # the tkinter event loop.  All tray callbacks will arrive on this thread

@@ -278,8 +278,20 @@ class SettingsWindow:
             row=1, column=0, columnspan=2, sticky="w", pady=4
         )
 
-        ttk.Label(frame, text="Minimize to tray on close: always", foreground="gray").grid(
+        hotkeys_var = tk.BooleanVar(value=self._working.get("enable_hotkeys", True))
+        self._vars["enable_hotkeys"] = hotkeys_var
+        ttk.Checkbutton(frame, text="Enable shortcuts", variable=hotkeys_var).grid(
             row=2, column=0, columnspan=2, sticky="w"
+        )
+
+        bar_var = tk.BooleanVar(value=self._working.get("show_floating_bar", True))
+        self._vars["show_floating_bar"] = bar_var
+        ttk.Checkbutton(frame, text="Show floating bar", variable=bar_var).grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=4
+        )
+
+        ttk.Label(frame, text="Minimize to tray on close: always", foreground="gray").grid(
+            row=4, column=0, columnspan=2, sticky="w"
         )
 
         frame.columnconfigure(1, weight=1)
@@ -352,6 +364,8 @@ class SettingsWindow:
                 "max_recording_hours": int(self._vars["max_recording_hours"].get()),
                 "start_with_windows": bool(self._vars["start_with_windows"].get()),
                 "show_notifications": bool(self._vars["show_notifications"].get()),
+                "enable_hotkeys": bool(self._vars["enable_hotkeys"].get()),
+                "show_floating_bar": bool(self._vars["show_floating_bar"].get()),
             }
         except (ValueError, KeyError) as e:
             messagebox.showerror("Invalid input", str(e), parent=self._root)
