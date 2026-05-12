@@ -340,6 +340,7 @@ def main() -> None:
         on_start=start_recording,
         on_stop=stop_recording,
         on_pause_resume=pause_resume,
+        on_settings=open_settings,
         get_state=lambda: recorder.state,
         get_elapsed=lambda: recorder.elapsed_seconds,
     )
